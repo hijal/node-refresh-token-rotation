@@ -1,4 +1,5 @@
 const bcrypt = require("bcryptjs");
+const { Op } = require("sequelize");
 const jwt = require("jsonwebtoken");
 const cuid = require("cuid");
 
@@ -41,11 +42,11 @@ class AuthController {
     };
 
     let token = jwt.sign(payload, process.env.APP_SECRET, {
-      expiresIn: "5m"
+      expiresIn: "1m"
     });
 
     let newRefreshToken = jwt.sign(payload, process.env.APP_SECRET, {
-      expiresIn: 15 * 60
+      expiresIn: "10m"
     });
 
     let newRefreshTokenArray = !cookies?.token
@@ -53,12 +54,9 @@ class AuthController {
       : user.refresh_token.filter((rt) => rt !== cookies.token);
 
     if (cookies?.token) {
+      logger.info("token available in cookie");
       let refreshToken = cookies.token;
-      let foundToken = await User.findOne({
-        where: {
-          refresh_token: refreshToken
-        }
-      });
+      let foundToken = user.refresh_token.includes(refreshToken);
 
       if (!foundToken) {
         logger.info("Attempted refresh token reuse at login.");
@@ -96,6 +94,126 @@ class AuthController {
     let user = await User.create(payload);
 
     return user;
+  }
+
+  async refresh(req, res) {
+    let cookies = req.cookies;
+
+    if (!cookies?.token) {
+      throw new Error("Unauthorized");
+    }
+
+    let refreshToken = cookies.token;
+
+    res.clearCookie("token", {
+      httpOnly: true,
+      secure: true
+    });
+
+    let user = await User.findOne({
+      where: {
+        refresh_token: {
+          [Op.contains]: refreshToken
+        }
+      }
+    });
+
+    if (!user) {
+      jwt.verify(refreshToken, process.env.APP_SECRET, async (err, decoded) => {
+        if (err) {
+          throw new Error("Forbidden");
+        }
+        logger.info("Attempted to refresh the token for reuse");
+        let userHacked = await User.findOne({
+          where: {
+            user_key: decoded.user_key
+          }
+        });
+        await userHacked.update({
+          refresh_token: []
+        });
+      });
+      throw new Error("Forbidden");
+    }
+
+    const newRefreshTokenArray = user.refresh_token.filter((rt) => rt !== refreshToken);
+    let accessToken = "",
+      newRefreshToken = "";
+
+    jwt.verify(refreshToken, process.env.APP_SECRET, async (err, decoded) => {
+      if (err) {
+        logger.info("expired refresh token");
+        await user.update({
+          refresh_token: [...newRefreshTokenArray]
+        });
+      }
+
+      if (err || decoded.user_key !== user.user_key) {
+        throw new Error("forbidden");
+      }
+      let payload = {
+        user_key: decoded.user_key
+      };
+
+      accessToken = jwt.sign(payload, process.env.APP_SECRET, {
+        expiresIn: "5m"
+      });
+
+      newRefreshToken = jwt.sign(payload, process.env.APP_SECRET, {
+        expiresIn: "10m"
+      });
+
+      await user.update({
+        refresh_token: [...newRefreshTokenArray, newRefreshToken]
+      });
+    });
+
+    res.cookie("token", newRefreshToken, {
+      httpOnly: true,
+      secure: true,
+      maxAge: 24 * 60 * 60 * 1000
+    });
+
+    return { accessToken };
+  }
+
+  async logout(req, res) {
+    let cookies = req.cookies;
+
+    if (!cookies?.token) {
+      throw new Error("No content");
+    }
+
+    let refreshToken = cookies.token;
+
+    let user = await User.findOne({
+      where: {
+        refresh_token: {
+          [Op.contains]: refreshToken
+        }
+      }
+    });
+
+    if (!user) {
+      res.clearCookie("token", {
+        httpOnly: true,
+        secure: true
+      });
+      throw new Error("No content");
+    }
+
+    let filterRefreshTokens = user.refresh_token.filter((rt) => rt !== refreshToken);
+
+    await user.update({
+      refresh_token: [...filterRefreshTokens]
+    });
+
+    res.clearCookie("token", {
+      httpOnly: true,
+      secure: true
+    });
+
+    res.status(204);
   }
 }
 

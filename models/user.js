@@ -12,7 +12,7 @@ module.exports = (sequelize, DataTypes) => {
       password: DataTypes.STRING,
       refresh_token: {
         type: DataTypes.JSONB,
-        defaultValue: [],
+        defaultValue: []
       }
     },
     {
